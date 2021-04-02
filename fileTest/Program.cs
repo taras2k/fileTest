@@ -271,10 +271,11 @@ namespace fileTest
                 fs.Flush(true);
             }
             long storagePosition = 0;
+            long lastWrittenPosition = 0;
+
             // open files and write to created file in parallel.  
             Parallel.For(0, numberOfFiles, i =>
                 {
-                    
                     // reopen file
                     using var fs = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite,
                         FileShare.ReadWrite);
@@ -293,8 +294,13 @@ namespace fileTest
                         }
                     );
                     fs.Flush(true);
+                    // set last written position
+                    var last = Interlocked.Read(ref lastWrittenPosition);
+                    if (pos > last)
+                        Interlocked.CompareExchange(ref lastWrittenPosition, pos, last);
                 }
             );
+            Console.WriteLine($"last written = {lastWrittenPosition}");
         }
         
         // appends files to storage in random order. File's chunks are written randomly.
