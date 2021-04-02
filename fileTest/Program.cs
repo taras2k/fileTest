@@ -2,23 +2,15 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace fileTest
 {
     internal class Program
     {
-        #region Members
-
-        private const int numberOfFiles = 48; // number of logical cpu's core in system - 48 (threadripper 3960) on my comp.
-        private const int numOfWords = 1000;
-        private const int wordSize = 8;
-        private const int totalSize = wordSize * numOfWords * numberOfFiles;
-        private const int bufferSize = 1000;
-
-        #endregion
-
         #region Main
+
         public static void Main(string[] args)
         {
             var path = Path.Combine(AppContext.BaseDirectory, "test.txt");
@@ -35,19 +27,34 @@ namespace fileTest
                 Debug.Assert(ms.Length == wordSize * numOfWords);
             }
 
-            WriteToStorage(path);
+            // WriteToStorage(path);
             // WriteToStorageNoLockFail(path);
             // AppendToStorage(path);
             // WriteToStorageSequentially(path);
-            //WriteToStorageSequentially2(path);
-
+            // WriteToStorageSequentially2(path);
+            // WriteToStorageReopenStorageFile(path);
+            WriteToStorageReopenStorageFile2(path);
             Console.ReadKey();
         }
+
+        #endregion
+
+        #region Members
+
+        private const int
+            numberOfFiles = 48; // number of logical cpu's core in system - 48 (threadripper 3960) on my comp.
+
+        private const int numOfWords = 1000;
+        private const int wordSize = 8;
+        private const int totalSize = wordSize * numOfWords * numberOfFiles;
+        private const int bufferSize = 1000;
+
         #endregion
 
         #region Api
 
-        // writes files to storage. Different parts of file could be written not sequentially.
+        // Writes files to storage.
+        // Different parts of the file could be written not sequentially into different position of storage.
         public static void WriteToStorage(string filePath)
         {
             if (File.Exists(filePath))
@@ -73,7 +80,8 @@ namespace fileTest
             fs.Flush(true);
         }
 
-        // this fails from time to time, when succeeds writes file's chunks randomly.
+        // This method fails from time to time.
+        // When it succeeds it writes file's chunks randomly.
         public static void WriteToStorageNoLockFail(string filePath)
         {
             using var fs = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
@@ -89,16 +97,19 @@ namespace fileTest
             fs.Flush(true);
         }
 
-        // allocates a place in a storage in advance according to index, so all files will be written in the same order as index.
+        // Allocates a place in a storage in advance according to index,
+        // so all files will be written in the same order as index.
         public static void WriteToStorageSequentially(string filePath)
         {
             var byteBuffer = new byte[totalSize];
             Array.Fill<byte>(byteBuffer, 0);
-            var lockObj = new object();
+            
             using var fs = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
             fs.Write(byteBuffer, 0, totalSize);
             fs.Flush(true);
             fs.Position = 0;
+            
+            var lockObj = new object();
             Parallel.For(0, numberOfFiles, i =>
                 {
                     // acquire position in storage
@@ -120,18 +131,21 @@ namespace fileTest
             );
             fs.Flush(true);
         }
-        // allocates a place in a storage in advance according to captured position in a storage. All files are written sequentially but in random order.
+
+        // Allocates a place in a storage in advance according to captured position in a storage.
+        // All file's chunks are written sequentially but files are merged in random order.
         public static void WriteToStorageSequentially2(string filePath)
         {
             // create a file of given size , file it with nulls
             var byteBuffer = new byte[totalSize];
             Array.Fill<byte>(byteBuffer, 0);
-            var lockObj = new object();
+            
             using var fs = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
             fs.SetLength(totalSize);
             fs.Position = 0;
             long position = 0;
 
+            var lockObj = new object();
             Parallel.For(0, numberOfFiles, i =>
                 {
                     // acquire position in storage
@@ -161,14 +175,17 @@ namespace fileTest
         }
 
 
-        //Same as WriteToStorageSequentially2 but uses SyncStream. allocates a place in a storage in advance according to captured position in a storage. All files are written sequentially but in random order.
-        public static void WriteToStorageSequentially3(string filePath)
+        //Same as WriteToStorageSequentially2 but uses SyncStream.
+        //allocates a place in a storage in advance according to captured position in a storage.
+        //All files are written sequentially but in random order.
+        public static void WriteToStorageSequentiallySyncStream(string filePath)
         {
             // create a file of given size , file it with nulls
             var byteBuffer = new byte[totalSize];
             Array.Fill<byte>(byteBuffer, 0);
             var lockObj = new object();
-            using var fs = Stream.Synchronized(new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite));
+            using var fs = Stream.Synchronized(new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                FileShare.ReadWrite));
             fs.SetLength(totalSize);
             fs.Position = 0;
             long position = 0;
@@ -200,6 +217,86 @@ namespace fileTest
             );
         }
 
+        // allocates a place in a storage in advance according to index,
+        // so all files will be written in the same order as index.
+        // re-opens storage file in parallel when writing. 
+        public static void WriteToStorageReopenStorageFile(string filePath)
+        {
+            // create a file
+            var byteBuffer = new byte[totalSize];
+            Array.Fill<byte>(byteBuffer, 0);
+
+            using (var fs = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite))
+            {
+                fs.Write(byteBuffer, 0, totalSize);
+                fs.Flush(true);
+            }
+
+            // open files and write to created file in parallel.  
+            Parallel.For(0, numberOfFiles, i =>
+                {
+                    // reopen file
+                    using var fs = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite,
+                        FileShare.ReadWrite);
+                    // acquire position in storage
+                    long pos = i * wordSize * numOfWords;
+
+                    WriteToStream(fs, i, (sp, stream) =>
+                        {
+                            // reset position
+                            fs.Position = pos;
+                            Console.WriteLine($"{i}  - {stream.Position}");
+                            stream.Write(sp);
+                            // advance position
+                            pos += sp.Length;
+                        }
+                    );
+                    fs.Flush(true);
+                }
+            );
+        }
+
+        // allocates a place in a storage in advance according to index,
+        // so all files will be written in the same order as index.
+        // re-opens storage file in parallel when writing.
+        public static void WriteToStorageReopenStorageFile2(string filePath)
+        {
+            // create a file
+            var byteBuffer = new byte[totalSize];
+            Array.Fill<byte>(byteBuffer, 0);
+
+            using (var fs = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite))
+            {
+                fs.Write(byteBuffer, 0, totalSize);
+                fs.Flush(true);
+            }
+            long storagePosition = 0;
+            // open files and write to created file in parallel.  
+            Parallel.For(0, numberOfFiles, i =>
+                {
+                    
+                    // reopen file
+                    using var fs = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite,
+                        FileShare.ReadWrite);
+                    
+                    // acquire position in storage
+                    long pos = Interlocked.Add(ref storagePosition, wordSize * numOfWords) - wordSize * numOfWords;
+
+                    WriteToStream(fs, i, (sp, stream) =>
+                        {
+                            // reset position
+                            fs.Position = pos;
+                            Console.WriteLine($"{i}  - {stream.Position}");
+                            stream.Write(sp);
+                            // advance position
+                            pos += sp.Length;
+                        }
+                    );
+                    fs.Flush(true);
+                }
+            );
+        }
+        
         // appends files to storage in random order. File's chunks are written randomly.
         public static void AppendToStorage(string filePath)
         {
@@ -223,7 +320,8 @@ namespace fileTest
         {
             var name = $"File{i}";
             var fileName = $"{name}.txt";
-            // word is 8 chars just to keep calculation easier
+            
+            // set word to 8 chars to keep calculation easier
             var word = (name + (i > 9 ? " \n" : "  \n")).ToCharArray();
 
             var str = string.Create(word.Length * numOfWords, word, (c, seed) =>
@@ -241,7 +339,7 @@ namespace fileTest
         }
 
         // writes file with index i to stream.
-        private static void WriteToStream(Stream stream, int i, ReadOnlySpanAction<byte, Stream> f)
+        private static void WriteToStream(Stream stream, int i, ReadOnlySpanAction<byte, Stream> write)
         {
             var fileName = $"File{i}.txt";
             var path = Path.Combine(AppContext.BaseDirectory, fileName);
@@ -261,9 +359,13 @@ namespace fileTest
                     left -= readOnce;
                     read += readOnce;
                 } while (left > 0 && readOnce > 0);
-
+                
+                // if "read" is less than buff size take only "read" number of bytes 
                 ReadOnlySpan<byte> sp = buff.Slice(0, read);
-                f(sp, stream);
+                
+                // write to stream
+                write(sp, stream);
+                // left to read more
                 readFromFile -= read;
             }
         }
