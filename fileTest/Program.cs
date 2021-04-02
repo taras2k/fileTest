@@ -103,12 +103,12 @@ namespace fileTest
         {
             var byteBuffer = new byte[totalSize];
             Array.Fill<byte>(byteBuffer, 0);
-            
+
             using var fs = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
             fs.Write(byteBuffer, 0, totalSize);
             fs.Flush(true);
             fs.Position = 0;
-            
+
             var lockObj = new object();
             Parallel.For(0, numberOfFiles, i =>
                 {
@@ -139,7 +139,7 @@ namespace fileTest
             // create a file of given size , file it with nulls
             var byteBuffer = new byte[totalSize];
             Array.Fill<byte>(byteBuffer, 0);
-            
+
             using var fs = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
             fs.SetLength(totalSize);
             fs.Position = 0;
@@ -261,27 +261,27 @@ namespace fileTest
         // re-opens storage file in parallel when writing.
         public static void WriteToStorageReopenStorageFile2(string filePath)
         {
-            // create a file
-            var byteBuffer = new byte[totalSize];
-            Array.Fill<byte>(byteBuffer, 0);
-
+            //create storage file
             using (var fs = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite))
             {
-                fs.Write(byteBuffer, 0, totalSize);
+                fs.SetLength(totalSize);
+                fs.Seek(-1, SeekOrigin.End);
+                fs.WriteByte(0);
                 fs.Flush(true);
             }
+
             long storagePosition = 0;
             long lastWrittenPosition = 0;
 
-            // open files and write to created file in parallel.  
+            // open files and write to created storage file in parallel.  
             Parallel.For(0, numberOfFiles, i =>
                 {
                     // reopen file
                     using var fs = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite,
                         FileShare.ReadWrite);
-                    
+
                     // acquire position in storage
-                    long pos = Interlocked.Add(ref storagePosition, wordSize * numOfWords) - wordSize * numOfWords;
+                    var pos = Interlocked.Add(ref storagePosition, wordSize * numOfWords) - wordSize * numOfWords;
 
                     WriteToStream(fs, i, (sp, stream) =>
                         {
@@ -302,7 +302,7 @@ namespace fileTest
             );
             Console.WriteLine($"last written = {lastWrittenPosition}");
         }
-        
+
         // appends files to storage in random order. File's chunks are written randomly.
         public static void AppendToStorage(string filePath)
         {
@@ -326,7 +326,7 @@ namespace fileTest
         {
             var name = $"File{i}";
             var fileName = $"{name}.txt";
-            
+
             // set word to 8 chars to keep calculation easier
             var word = (name + (i > 9 ? " \n" : "  \n")).ToCharArray();
 
@@ -365,10 +365,10 @@ namespace fileTest
                     left -= readOnce;
                     read += readOnce;
                 } while (left > 0 && readOnce > 0);
-                
+
                 // if "read" is less than buff size take only "read" number of bytes 
                 ReadOnlySpan<byte> sp = buff.Slice(0, read);
-                
+
                 // write to stream
                 write(sp, stream);
                 // left to read more
